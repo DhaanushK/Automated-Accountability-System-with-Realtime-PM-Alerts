@@ -1,0 +1,310 @@
+/* IST Clock Container */
+.ist-clock-container {
+  background: white;
+  border-radius: 20px;
+  padding: 40px;
+  box-shadow: 0 4px 20px rgba(0, 0, 0, 0.1);
+  max-width: 100%;
+}
+
+/* Header */
+.clock-header {
+  text-align: center;
+  margin-bottom: 30px;
+  border-bottom: 2px solid #f0f0f0;
+  padding-bottom: 20px;
+}
+
+.clock-header h2 {
+  font-size: 32px;
+  color: #2d3748;
+  margin: 0 0 10px 0;
+  font-weight: 700;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 12px;
+}
+
+.clock-header h2 i {
+  color: #667eea;
+  font-size: 36px;
+}
+
+.timezone-info {
+  font-size: 14px;
+  color: #718096;
+  margin: 0;
+  font-weight: 500;
+}
+
+/* Clock Content */
+.clock-content {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 40px;
+  margin-bottom: 30px;
+  align-items: center;
+}
+
+/* Analog Clock */
+.analog-clock {
+  display: flex;
+  justify-content: center;
+  align-items: center;
+  padding: 20px;
+}
+
+.clock-face {
+  width: 100%;
+  max-width: 400px;
+  height: auto;
+  filter: drop-shadow(0 4px 10px rgba(0, 0, 0, 0.1));
+}
+
+/* Digital Clock */
+.digital-clock {
+  text-align: center;
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  align-items: center;
+  height: 100%;
+}
+
+.time-display {
+  font-size: 64px;
+  font-weight: 700;
+  color: #2d3748;
+  font-family: 'Courier New', monospace;
+  background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
+  background-clip: text;
+  margin-bottom: 20px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 5px;
+}
+
+.time-display .hours,
+.time-display .minutes,
+.time-display .seconds {
+  min-width: 80px;
+  display: inline-block;
+}
+
+.time-display .separator {
+  font-weight: 400;
+  opacity: 0.7;
+  animation: blink 1s infinite;
+}
+
+@keyframes blink {
+  0%, 49% { opacity: 1; }
+  50%, 100% { opacity: 0.3; }
+}
+
+.time-display .period {
+  font-size: 32px;
+  margin-left: 10px;
+  opacity: 0.8;
+}
+
+.date-display {
+  padding: 25px 40px;
+  background: linear-gradient(135deg, #f093fb 0%, #f5576c 100%);
+  border-radius: 12px;
+  color: white;
+  box-shadow: 0 4px 15px rgba(240, 147, 251, 0.3);
+  width: fit-content;
+  margin: 0 auto;
+  min-width: 300px;
+}
+
+.day-name {
+  font-size: 24px;
+  font-weight: 600;
+  margin-bottom: 8px;
+}
+
+.full-date {
+  font-size: 18px;
+  opacity: 0.95;
+  font-weight: 500;
+}
+
+/* Clock Footer - Info Cards */
+.clock-footer {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+  gap: 15px;
+  margin-top: 30px;
+  padding-top: 30px;
+  border-top: 2px solid #f0f0f0;
+}
+
+.info-card {
+  display: flex;
+  align-items: center;
+  gap: 15px;
+  padding: 15px;
+  background: #f7fafc;
+  border-radius: 12px;
+  border-left: 4px solid #667eea;
+  transition: transform 0.2s ease, box-shadow 0.2s ease;
+}
+
+.info-card:hover {
+  transform: translateY(-2px);
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.1);
+}
+
+.info-card i {
+  font-size: 28px;
+  color: #667eea;
+  min-width: 28px;
+}
+
+.info-label {
+  font-size: 12px;
+  color: #718096;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  margin-bottom: 4px;
+}
+
+.info-value {
+  font-size: 14px;
+  color: #2d3748;
+  font-weight: 700;
+}
+
+/* Responsive Design */
+@media (max-width: 968px) {
+  .clock-content {
+    grid-template-columns: 1fr;
+    gap: 30px;
+  }
+
+  .analog-clock {
+    order: 1;
+  }
+
+  .digital-clock {
+    order: 2;
+  }
+
+  .clock-face {
+    max-width: 250px;
+  }
+
+  .time-display {
+    font-size: 40px;
+  }
+
+  .time-display .hours,
+  .time-display .minutes,
+  .time-display .seconds {
+    min-width: 50px;
+  }
+}
+
+@media (max-width: 768px) {
+  .ist-clock-container {
+    padding: 20px;
+  }
+
+  .clock-header h2 {
+    font-size: 24px;
+  }
+
+  .clock-header h2 i {
+    font-size: 28px;
+  }
+
+  .time-display {
+    font-size: 36px;
+  }
+
+  .time-display .hours,
+  .time-display .minutes,
+  .time-display .seconds {
+    min-width: 45px;
+  }
+
+  .time-display .period {
+    font-size: 20px;
+  }
+
+  .clock-footer {
+    grid-template-columns: 1fr;
+  }
+
+  .clock-face {
+    max-width: 220px;
+  }
+}
+
+@media (max-width: 480px) {
+  .ist-clock-container {
+    padding: 15px;
+  }
+
+  .clock-header h2 {
+    font-size: 20px;
+    flex-direction: column;
+    gap: 8px;
+  }
+
+  .time-display {
+    font-size: 42px;
+    flex-wrap: wrap;
+  }
+
+  .time-display .hours,
+  .time-display .minutes,
+  .time-display .seconds {
+    min-width: 50px;
+  }
+
+  .date-display {
+    padding: 18px;
+  }
+
+  .day-name {
+    font-size: 20px;
+  }
+
+  .full-date {
+    font-size: 16px;
+  }
+
+  .info-card {
+    padding: 12px;
+  }
+
+  .info-card i {
+    font-size: 24px;
+  }
+}
+
+/* Animation for smooth transitions */
+.clock-face line,
+.clock-face circle {
+  transition: all 0.05s ease-out;
+}
+
+/* Accessibility */
+@media (prefers-reduced-motion: reduce) {
+  .time-display .separator {
+    animation: none;
+    opacity: 1;
+  }
+  
+  .info-card:hover {
+    transform: none;
+  }
+}
