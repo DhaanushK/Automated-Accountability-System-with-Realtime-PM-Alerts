@@ -8,6 +8,7 @@ import { dirname, join } from 'path';
 import connectDB from "./config/db.js";
 import authRoutes from "./routes/authRoutes.js";
 import metricsRoutes from "./routes/metricsRoutes.js";
+import dailySubmissionRoutes from "./routes/dailySubmissionRoutes.js";
 import logsRoutes from "./routes/logsRoutes.js";
 import sheetRoutes from "./routes/sheetRoutes.js";
 import projectManagerEmailRoutes from "./routes/projectManagerEmailRoutes.js";
@@ -21,6 +22,7 @@ import googleAuthRoutes from "./routes/googleAuthRoutes.js";
 import ticketRoutes from "./routes/ticketRoutes.js";
 import alertRoutes from "./routes/alertRoutes.js";
 import { initializeAlertScheduler } from "./schedulers/alertScheduler.js";
+import { formatSubmissionError } from "./services/dailySubmissionService.js";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
@@ -89,6 +91,7 @@ app.use(express.urlencoded({
 app.use("/api/auth", authRoutes);
 app.use("/api/google", googleAuthRoutes);
 app.use("/api/metrics", metricsRoutes);
+app.use("/api/daily-submissions", dailySubmissionRoutes);
 app.use("/api/logs", logsRoutes);
 app.use("/api/sheets", sheetRoutes);
 app.use("/api/pm-email", projectManagerEmailRoutes);
@@ -112,6 +115,11 @@ app.get("/", (req, res) => {
 
 // Global error handling middleware
 app.use((err, req, res, next) => {
+  if (req.standardApiErrors) {
+    const formatted = formatSubmissionError(err);
+    if (formatted.status >= 500) console.error('[daily-submissions] Request failed:', err?.name || 'Error');
+    return res.status(formatted.status).json(formatted.body);
+  }
   console.error('Error:', err);
   
   // Set CORS headers
@@ -135,7 +143,7 @@ app.use((err, req, res, next) => {
   });
 });
 
-const PORT = process.env.PORT || 5001;
+const PORT = Number(process.env.PORT) || 5002;
 let server;
 
 // Function to gracefully shutdown the server
@@ -171,13 +179,8 @@ const startServer = () => {
 
     server.on('error', (error) => {
       if (error.code === 'EADDRINUSE') {
-        console.error(`⚠️ Port ${PORT} is already in use`);
-        console.log('Attempting to find another port...');
-        const newPort = PORT + 1;
-        console.log(`Trying port ${newPort}...`);
-        server = app.listen(newPort, () => {
-          console.log(`🚀 Server running on alternate port ${newPort}`);
-        });
+        console.error(`⚠️ Port ${PORT} is already in use. Set PORT to an available port and update the Vite proxy target.`);
+        process.exit(1);
       } else {
         console.error('Server error:', error);
         process.exit(1);
