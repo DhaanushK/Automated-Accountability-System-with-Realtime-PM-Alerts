@@ -1,12 +1,14 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import http from "node:http";
 import express from "express";
 import jwt from "jsonwebtoken";
+import { Readable } from "node:stream";
+import http from "node:http";
 
 import User from "../src/models/User.js";
 import { authMiddleware } from "../src/middleware/auth.js";
 import { createDailySubmissionRouter } from "../src/routes/dailySubmissionRoutes.js";
+import { dailySubmissionController } from "../src/controllers/dailySubmissionController.js";
 import {
   formatSubmissionError,
   getReportingDateAt,
@@ -15,7 +17,6 @@ import {
 } from "../src/services/dailySubmissionService.js";
 import {
   assertActiveTeamMember,
-  assertProjectManagerScope,
   assertTeamLeadScope,
   getAuthenticatedUserId,
   loadSubmissionActor
@@ -42,63 +43,155 @@ async function withApi({
   role = "team_member",
   active = true,
   actorLoader,
-  userLookup
+  userLookup,
+  setupFailure
 } = {}, callback) {
+  // This helper temporarily patches process.env and singleton model/controller methods.
+  // Concurrent tests using it are unsupported; keep them serial unless the harness
+  // is redesigned around isolated dependency injection.
   const originalSecret = process.env.JWT_SECRET;
   const originalFindById = User.findById;
+  const controllerMethods = Object.keys(dailySubmissionController);
+  const originalControllers = Object.fromEntries(controllerMethods.map(key => [key, dailySubmissionController[key]]));
+  const calls = {
+    userLookups: 0,
+    actorLoads: 0,
+    readiness: 0,
+    controllers: Object.fromEntries(controllerMethods.map(key => [key, 0]))
+  };
 
-  process.env.JWT_SECRET = tokenSecret;
-
-  User.findById = userLookup || (() => ({
-    select: async () => ({
-      _id: userId,
-      email: "test@example.invalid",
-      role,
-      name: "Offline Test"
-    })
-  }));
-
-  const app = express();
-  app.use(express.json());
-  app.use("/api/daily-submissions", createDailySubmissionRouter({
-    isStoreReady: () => ready,
-    clock: testClock,
-    actorLoader: actorLoader || (async () => ({
-      id: userId,
-      role,
-      active,
-      teamId: "team-1",
-      managerId: null
-    }))
-  }));
-  app.use((error, req, res, next) => {
-    const result = formatSubmissionError(error);
-    res.status(result.status).json(result.body);
-  });
-
-  const server = http.createServer(app);
-  await new Promise(resolve => server.listen(0, "127.0.0.1", resolve));
-  const address = server.address();
   try {
-    await callback("http://127.0.0.1:" + address.port);
+    process.env.JWT_SECRET = tokenSecret;
+
+    const lookupUser = userLookup || (() => ({
+      select: async () => ({
+        _id: userId,
+        email: "test@example.invalid",
+        role,
+        name: "Offline Test"
+      })
+    }));
+    User.findById = (...args) => {
+      calls.userLookups += 1;
+      return lookupUser(...args);
+    };
+
+    for (const key of controllerMethods) {
+      dailySubmissionController[key] = (...args) => {
+        calls.controllers[key] += 1;
+        return originalControllers[key](...args);
+      };
+    }
+
+    // Regression seam: simulate a setup exception after all global patches.
+    setupFailure?.();
+
+    const app = express();
+    app.use(express.json());
+    app.use("/api/daily-submissions", createDailySubmissionRouter({
+      isStoreReady: () => {
+        calls.readiness += 1;
+        return ready;
+      },
+      clock: testClock,
+      actorLoader: async (...args) => {
+        calls.actorLoads += 1;
+        return (actorLoader || (async () => ({
+          id: userId,
+          role,
+          active,
+          teamId: "team-1",
+          managerId: null
+        })))(...args);
+      }
+    }));
+    app.use((error, req, res, next) => {
+      const result = formatSubmissionError(error);
+      res.status(result.status).json(result.body);
+    });
+
+    await callback((path, options) => request(app, path, options), calls);
   } finally {
-    await new Promise((resolve, reject) => server.close(error => error ? reject(error) : resolve()));
-    User.findById = originalFindById;
-    if (originalSecret === undefined) delete process.env.JWT_SECRET;
-    else process.env.JWT_SECRET = originalSecret;
+    try {
+      User.findById = originalFindById;
+    } finally {
+      try {
+        for (const key of controllerMethods) dailySubmissionController[key] = originalControllers[key];
+      } finally {
+        if (originalSecret === undefined) delete process.env.JWT_SECRET;
+        else process.env.JWT_SECRET = originalSecret;
+      }
+    }
   }
 }
 
-async function request(base, path, { method = "GET", token = signedToken(), body } = {}) {
+async function request(app, path, { method = "GET", token = signedToken(), body } = {}) {
+  if (typeof app === "function" && typeof app.handle !== "function") {
+    return app(path, { method, token, body });
+  }
   const headers = {};
   if (token) headers.authorization = "Bearer " + token;
-  if (body !== undefined) headers["content-type"] = "application/json";
-  const response = await fetch(base + "/api/daily-submissions" + path, {
+  let payload;
+  if (body !== undefined) {
+    payload = Buffer.from(JSON.stringify(body));
+    headers["content-type"] = "application/json";
+    headers["content-length"] = String(payload.length);
+  }
+  return dispatchInProcess(app, {
     method,
+    url: "/api/daily-submissions" + path,
     headers,
-    body: body === undefined ? undefined : JSON.stringify(body)
+    body: payload
   });
-  return { status: response.status, body: await response.json() };
+}
+
+// Test-only JSON status/body sink: the Readable request goes through Express's
+// app.handle(), but this is not a complete Node ServerResponse implementation.
+// Do not use it for streaming, redirects, cookies, header-sensitive behavior,
+// or full Node response-lifecycle assertions. No socket/listener/fetch is used.
+function dispatchInProcess(app, { method = "GET", url = "/", headers = {}, body } = {}) {
+  const req = Readable.from(body ? [body] : []);
+  Object.setPrototypeOf(req, express.request);
+  req.method = method;
+  req.url = url;
+  req.originalUrl = url;
+  req.baseUrl = "";
+  req.headers = headers;
+  req.httpVersion = "1.1";
+  req.httpVersionMajor = 1;
+  req.httpVersionMinor = 1;
+  req.complete = true;
+  req.connection = {};
+  req.socket = {};
+  req.app = app;
+  req.res = undefined;
+
+  const res = new http.ServerResponse(req);
+  Object.setPrototypeOf(res, express.response);
+  res.app = app;
+  res.req = req;
+  req.res = res;
+
+  return new Promise((resolve, reject) => {
+    const chunks = [];
+    res.write = chunk => {
+      if (chunk !== undefined) chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(String(chunk)));
+      return true;
+    };
+    res.end = chunk => {
+      if (chunk !== undefined) chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(String(chunk)));
+      const text = Buffer.concat(chunks).toString("utf8");
+      let parsed;
+      try { parsed = text ? JSON.parse(text) : undefined; }
+      catch { return reject(new Error("Express response was not valid JSON: " + text)); }
+      resolve({ status: res.statusCode, body: parsed });
+      return res;
+    };
+    app.handle(req, res, error => {
+      if (error) reject(error);
+      else if (!res.writableEnded) reject(new Error("Express completed without ending the response"));
+    });
+  });
 }
 
 test("route foundation registers the required POST and four GET paths", async () => {
@@ -114,6 +207,29 @@ test("route foundation registers the required POST and four GET paths", async ()
     { path: "/me/:reportingDate", methods: ["get"] },
     { path: "/:submissionId", methods: ["get"] }
   ]);
+});
+
+test("withApi restores all patched global state when setup throws", async () => {
+  const originalSecret = process.env.JWT_SECRET;
+  const originalFindById = User.findById;
+  const originalControllers = Object.fromEntries(
+    Object.keys(dailySubmissionController).map(key => [key, dailySubmissionController[key]])
+  );
+
+  await assert.rejects(
+    () => withApi({
+      setupFailure() {
+        throw new Error("Synthetic setup failure after global patches");
+      }
+    }, async () => assert.fail("callback must not run after setup failure")),
+    /Synthetic setup failure after global patches/
+  );
+
+  assert.equal(process.env.JWT_SECRET, originalSecret);
+  assert.equal(User.findById, originalFindById);
+  for (const [key, method] of Object.entries(originalControllers)) {
+    assert.equal(dailySubmissionController[key], method);
+  }
 });
 
 test("Asia/Kolkata reporting date is independent of host timezone", () => {
@@ -154,15 +270,18 @@ test("submission validation accepts only current IST reporting date and allowed 
 });
 
 test("not-ready store returns a standard 503 before authentication or database lookup", async () => {
-  await withApi({ ready: false }, async base => {
+  await withApi({ ready: false }, async (base, calls) => {
     const response = await request(base, "/me/current", { token: null });
     assert.equal(response.status, 503);
     assert.deepEqual(response.body.error.code, "SUBMISSION_STORE_UNAVAILABLE");
+    assert.equal(calls.readiness, 1);
+    assert.equal(calls.userLookups, 0);
+    assert.equal(calls.controllers.getCurrent, 0);
   });
 });
 
 test("missing and invalid JWTs return the standard authentication envelope", async () => {
-  await withApi({}, async base => {
+  await withApi({}, async (base, calls) => {
     const missing = await request(base, "/me/current", { token: null });
     assert.equal(missing.status, 401);
     assert.equal(missing.body.success, false);
@@ -171,6 +290,7 @@ test("missing and invalid JWTs return the standard authentication envelope", asy
     const invalid = await request(base, "/me/current", { token: "invalid.token" });
     assert.equal(invalid.status, 401);
     assert.equal(invalid.body.error.code, "UNAUTHENTICATED");
+    assert.equal(calls.userLookups, 0);
   });
 });
 
@@ -264,8 +384,6 @@ test("actor mapping and scope checks fail closed while allowing assigned Team Le
     teamId: "team-2",
     managerId: actor.id
   }), error => error.status === 403);
-  assert.throws(() => assertProjectManagerScope({ role: "project_manager", active: true }), error => error.status === 403);
-  assert.equal(assertProjectManagerScope({ role: "project_manager", active: true }, { organizationAuthorized: true }), true);
 });
 
 
@@ -292,12 +410,13 @@ test("valid JWT referencing a missing user returns 401", async () => {
     userLookup: () => ({
       select: async () => null
     })
-  }, async base => {
+  }, async (base, calls) => {
     const response = await request(base, "/me/current");
 
     assert.equal(response.status, 401);
     assert.equal(response.body.success, false);
     assert.equal(response.body.error.code, "UNAUTHENTICATED");
+    assert.equal(calls.userLookups, 1);
   });
 });
 
@@ -308,7 +427,7 @@ test("authentication database failure returns a safe 500 response", async () => 
         throw new Error("Sensitive database connection details");
       }
     })
-  }, async base => {
+  }, async (base, calls) => {
     const response = await request(base, "/me/current");
 
     assert.equal(response.status, 500);
@@ -321,6 +440,7 @@ test("authentication database failure returns a safe 500 response", async () => 
       JSON.stringify(response.body).includes("Sensitive database"),
       false
     );
+    assert.equal(calls.userLookups, 1);
   });
 });
 
@@ -341,13 +461,15 @@ test("authenticated JWT identity is used for database lookup", async () => {
         })
       };
     }
-  }, async base => {
+  }, async (base, calls) => {
     const response = await request(base, "/me/current", {
       token: signedToken(alternateUserId)
     });
 
     assert.equal(response.status, 501);
     assert.equal(lookedUpId, alternateUserId);
+    assert.equal(calls.userLookups, 1);
+    assert.equal(calls.controllers.getCurrent, 1);
   });
 });
 
@@ -356,43 +478,34 @@ test("legacy authentication preserves the existing missing-user response", async
   const originalSecret = process.env.JWT_SECRET;
   const originalFindById = User.findById;
 
-  process.env.JWT_SECRET = tokenSecret;
-
-  User.findById = () => ({
-    select: async () => null
-  });
-
-  const app = express();
-
-  // Deliberately do not set standardApiErrors.
-  app.get("/legacy", authMiddleware, (req, res) => {
-    res.json({ success: true });
-  });
-
-  const server = http.createServer(app);
-  await new Promise(resolve => server.listen(0, "127.0.0.1", resolve));
-
+  // This legacy harness patches process-wide state too; it must remain serial.
   try {
-    const response = await fetch(
-      "http://127.0.0.1:" + server.address().port + "/legacy",
-      { headers: { authorization: "Bearer " + signedToken() } }
-    );
+    process.env.JWT_SECRET = tokenSecret;
+    User.findById = () => ({
+      select: async () => null
+    });
 
-    const body = await response.json();
+    const app = express();
+    // Deliberately do not set standardApiErrors.
+    app.get("/legacy", authMiddleware, (req, res) => {
+      res.json({ success: true });
+    });
 
+    const response = await dispatchInProcess(app, {
+      url: "/legacy",
+      headers: { authorization: "Bearer " + signedToken() }
+    });
     assert.equal(response.status, 404);
-    assert.deepEqual(body, { message: "User not found" });
+    assert.deepEqual(response.body, { message: "User not found" });
   } finally {
-    await new Promise((resolve, reject) =>
-      server.close(error => error ? reject(error) : resolve())
-    );
-
-    User.findById = originalFindById;
-
-    if (originalSecret === undefined) {
-      delete process.env.JWT_SECRET;
-    } else {
-      process.env.JWT_SECRET = originalSecret;
+    try {
+      User.findById = originalFindById;
+    } finally {
+      if (originalSecret === undefined) {
+        delete process.env.JWT_SECRET;
+      } else {
+        process.env.JWT_SECRET = originalSecret;
+      }
     }
   }
 });
@@ -420,6 +533,154 @@ test("POST rejects Team Leads and Project Managers before actor loading", async 
       assert.equal(actorLoads, 0);
     });
   }
+});
+
+test("database role controls each self-service route and rejected roles never reach controllers", async () => {
+  const selfRoutes = [
+    ["/me/history", "getHistory"],
+    ["/me/current", "getCurrent"],
+    ["/me/" + reportingDate, "getOwnDay"]
+  ];
+  for (const [path, controller] of selfRoutes) {
+    await withApi({ role: "team_member" }, async (send, calls) => {
+      const response = await send(path);
+      assert.equal(response.status, 501, path + " should reach its disabled controller");
+      assert.equal(calls.controllers[controller], 1);
+    });
+    for (const role of ["team_lead", "project_manager"]) {
+      await withApi({ role }, async (send, calls) => {
+        const response = await send(path);
+        assert.equal(response.status, 403, role + " must be denied at " + path);
+        assert.equal(response.body.error.code, "FORBIDDEN");
+        assert.equal(calls.controllers[controller], 0);
+      });
+    }
+  }
+});
+
+test("database role overrides forged JWT role and active claims", async () => {
+  const forgedRoleToken = jwt.sign({ id: userId, role: "project_manager", active: false }, tokenSecret);
+  await withApi({ role: "team_member", active: true }, async (send, calls) => {
+    const response = await send("/me/current", { token: forgedRoleToken });
+    assert.equal(response.status, 501);
+    assert.equal(calls.userLookups, 1);
+    assert.equal(calls.controllers.getCurrent, 1);
+  });
+
+  const forgedActiveToken = jwt.sign({ id: userId, role: "team_member", active: true }, tokenSecret);
+  await withApi({ role: "team_member", active: false }, async (send, calls) => {
+    const response = await send("/", {
+      method: "POST",
+      token: forgedActiveToken,
+      body: { reportingDate, metrics: validMetrics }
+    });
+    assert.equal(response.status, 403);
+    assert.equal(response.body.error.code, "ACCOUNT_INACTIVE");
+    assert.equal(calls.actorLoads, 1);
+    assert.equal(calls.controllers.submit, 0);
+  });
+});
+
+test("supported roles reach only the disabled detail stub and unsupported roles are denied", async () => {
+  const validId = "64b000000000000000000099";
+  for (const role of ["team_member", "team_lead", "project_manager"]) {
+    await withApi({ role }, async (send, calls) => {
+      const response = await send("/" + validId);
+      assert.equal(response.status, 501);
+      assert.equal(calls.controllers.getDetail, 1);
+    });
+  }
+  await withApi({ role: "administrator" }, async (send, calls) => {
+    const response = await send("/" + validId);
+    assert.equal(response.status, 403);
+    assert.equal(response.body.error.code, "FORBIDDEN");
+    assert.equal(calls.controllers.getDetail, 0);
+  });
+});
+
+test("invalid detail identifiers stop before controller and POST payload validation remains active", async () => {
+  await withApi({ role: "team_member" }, async (send, calls) => {
+    const detail = await send("/not-an-object-id");
+    assert.equal(detail.status, 400);
+    assert.equal(detail.body.error.code, "INVALID_REQUEST");
+    assert.equal(calls.controllers.getDetail, 0);
+
+    const invalidPost = await send("/", {
+      method: "POST",
+      body: { reportingDate: "2026-11-10", metrics: validMetrics }
+    });
+    assert.equal(invalidPost.status, 400);
+    assert.equal(invalidPost.body.error.code, "INVALID_REPORTING_DATE");
+    assert.equal(calls.actorLoads, 0);
+    assert.equal(calls.controllers.submit, 0);
+  });
+});
+
+test("client identity cannot replace the authenticated identity used by POST actor loading", async () => {
+  const authenticatedId = "64b000000000000000000002";
+  const otherId = "64b000000000000000000003";
+  let loadedId;
+  await withApi({ actorLoader: async id => {
+    loadedId = id;
+    return { id, role: "team_member", active: true, teamId: "team-1", managerId: null };
+  } }, async (send, calls) => {
+    const response = await send("/", {
+      method: "POST",
+      token: signedToken(authenticatedId),
+      body: { reportingDate, metrics: validMetrics, employeeId: otherId }
+    });
+    assert.equal(response.status, 400);
+    assert.equal(response.body.error.code, "INVALID_REQUEST");
+    assert.equal(loadedId, undefined);
+    assert.equal(calls.actorLoads, 0);
+    assert.equal(calls.controllers.submit, 0);
+  });
+});
+
+test("valid POST forwards the authenticated identity, never a client query identity", async () => {
+  const authenticatedId = "64b000000000000000000004";
+  const clientChosenId = "64b000000000000000000005";
+  let databaseLookupId;
+  let actorArguments;
+
+  await withApi({
+    userLookup: id => {
+      databaseLookupId = String(id);
+      return {
+        select: async () => ({
+          _id: authenticatedId,
+          email: "synthetic@example.invalid",
+          role: "team_member",
+          name: "Synthetic Member"
+        })
+      };
+    },
+    actorLoader: async (...args) => {
+      actorArguments = args;
+      return {
+        id: authenticatedId,
+        role: "team_member",
+        active: true,
+        teamId: "synthetic-team",
+        managerId: null
+      };
+    }
+  }, async (send, calls) => {
+    const response = await send("/?employeeId=" + clientChosenId, {
+      method: "POST",
+      token: signedToken(authenticatedId),
+      body: { reportingDate, metrics: validMetrics }
+    });
+
+    assert.equal(databaseLookupId, authenticatedId);
+    assert.deepEqual(actorArguments, [authenticatedId]);
+    assert.equal(actorArguments.includes(clientChosenId), false);
+    assert.equal(calls.userLookups, 1);
+    assert.equal(calls.actorLoads, 1);
+    assert.equal(calls.controllers.submit, 1);
+    assert.equal(response.status, 501);
+    assert.equal(response.body.error.code, "NOT_IMPLEMENTED");
+  });
 });
 
 
@@ -512,51 +773,3 @@ test("Team Lead scope rejects inactive users and incomplete or mismatched roster
   );
 });
 
-
-test("Project Manager scope requires an active authorized Project Manager", () => {
-  const projectManager = {
-    id: "64b000000000000000000010",
-    role: "project_manager",
-    active: true
-  };
-
-  // Explicit organizational authorization is accepted.
-  assert.equal(
-    assertProjectManagerScope(projectManager, {
-      organizationAuthorized: true
-    }),
-    true
-  );
-
-  // Missing authorization is rejected.
-  assert.throws(
-    () => assertProjectManagerScope(projectManager),
-    error => error.status === 403 && error.code === "FORBIDDEN"
-  );
-
-  // Explicitly denied authorization is rejected.
-  assert.throws(
-    () => assertProjectManagerScope(projectManager, {
-      organizationAuthorized: false
-    }),
-    error => error.status === 403 && error.code === "FORBIDDEN"
-  );
-
-  // Inactive Project Manager is rejected.
-  assert.throws(
-    () => assertProjectManagerScope(
-      { ...projectManager, active: false },
-      { organizationAuthorized: true }
-    ),
-    error => error.status === 403 && error.code === "FORBIDDEN"
-  );
-
-  // Other roles cannot use Project Manager authorization.
-  assert.throws(
-    () => assertProjectManagerScope(
-      { ...projectManager, role: "team_lead" },
-      { organizationAuthorized: true }
-    ),
-    error => error.status === 403 && error.code === "FORBIDDEN"
-  );
-});

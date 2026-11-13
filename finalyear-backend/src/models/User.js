@@ -40,6 +40,15 @@ const userSchema = new mongoose.Schema({
       message: "employmentStartDate must be a valid YYYY-MM-DD date"
     }
   },
+  assignmentRevision: {
+  type: Number,
+  default: 0,
+  min: 0,
+  validate: {
+    validator: Number.isSafeInteger,
+    message: "assignmentRevision must be a safe integer"
+  }
+  },
   employmentEndDate: {
     type: String,
     default: null,

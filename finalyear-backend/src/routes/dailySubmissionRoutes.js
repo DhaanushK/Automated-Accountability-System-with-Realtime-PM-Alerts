@@ -50,17 +50,17 @@ export function createDailySubmissionRouter({
 
   router.get(
     "/me/history",
-    authorizeRoles(...SUPPORTED_ROLES),
+    authorizeRoles("team_member"),
     dailySubmissionController.getHistory
   );
   router.get(
     "/me/current",
-    authorizeRoles(...SUPPORTED_ROLES),
+    authorizeRoles("team_member"),
     dailySubmissionController.getCurrent
   );
   router.get(
     "/me/:reportingDate",
-    authorizeRoles(...SUPPORTED_ROLES),
+    authorizeRoles("team_member"),
     dailySubmissionController.getOwnDay
   );
   router.get(

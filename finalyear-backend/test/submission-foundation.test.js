@@ -1,7 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import mongoose from "mongoose";
-
+import EmployeeReportingAssignment from "../src/models/EmployeeReportingAssignment.js";
 import User from "../src/models/User.js";
 import MetricSubmission from "../src/models/MetricSubmission.js";
 import ExpectedSubmission from "../src/models/ExpectedSubmission.js";
@@ -546,4 +546,175 @@ test("exception evaluation requires a target employee", () => {
     endDate: reportingDate
   };
   assert.equal(isApprovedExceptionForDate(globalHoliday, reportingDate), false);
+});
+
+const assignmentEmployeeId = new mongoose.Types.ObjectId();
+const assignmentTeamLeadId = new mongoose.Types.ObjectId();
+
+function validAssignment(overrides = {}) {
+  return new EmployeeReportingAssignment({
+    employeeId: assignmentEmployeeId,
+    teamLeadId: assignmentTeamLeadId,
+    teamId: "TEAM-ALPHA",
+    effectiveStartDate: "2026-10-11",
+    effectiveEndDate: null,
+    assignmentType: "INITIAL",
+    sourceType: "SIMULATED_ROSTER",
+    sourceReference: "SYNTHETIC_ROSTER_2026-10-11",
+    ...overrides
+  });
+}
+
+test("EmployeeReportingAssignment accepts a valid initial assignment", async () => {
+  await validAssignment().validate();
+});
+
+test("EmployeeReportingAssignment requires employee, lead, team and start date", async () => {
+  await assert.rejects(
+    new EmployeeReportingAssignment({}).validate(),
+    error => {
+      assert.equal(error.name, "ValidationError");
+      assert.ok(error.errors.employeeId);
+      assert.ok(error.errors.teamLeadId);
+      assert.ok(error.errors.teamId);
+      assert.ok(error.errors.effectiveStartDate);
+      assert.ok(error.errors.assignmentType);
+      assert.ok(error.errors.sourceType);
+      return true;
+    }
+  );
+});
+
+test("EmployeeReportingAssignment rejects invalid reporting dates", async () => {
+  await assert.rejects(
+    validAssignment({ effectiveStartDate: "2026-02-30" }).validate(),
+    error => error.name === "ValidationError"
+  );
+
+  await assert.rejects(
+    validAssignment({ effectiveEndDate: "2026-02-30" }).validate(),
+    error => error.name === "ValidationError"
+  );
+});
+
+test("EmployeeReportingAssignment rejects an end date before its start date", async () => {
+  await assert.rejects(
+    validAssignment({
+      effectiveStartDate: "2026-10-11",
+      effectiveEndDate: "2026-10-10"
+    }).validate(),
+    /effectiveEndDate cannot precede effectiveStartDate/
+  );
+});
+
+test("EmployeeReportingAssignment accepts a same-day inclusive assignment", async () => {
+  await validAssignment({
+    effectiveStartDate: "2026-10-11",
+    effectiveEndDate: "2026-10-11"
+  }).validate();
+});
+
+test("EmployeeReportingAssignment requires a source reference for verified sources", async () => {
+  await assert.rejects(
+    validAssignment({
+      sourceType: "VERIFIED_SOURCE",
+      sourceReference: null
+    }).validate(),
+    /Verified assignments require a source reference/
+  );
+
+  await validAssignment({
+    sourceType: "VERIFIED_SOURCE",
+    sourceReference: "HR-ROSTER-2026-001"
+  }).validate();
+});
+
+test("EmployeeReportingAssignment rejects invalid assignment types and sources", async () => {
+  await assert.rejects(
+    validAssignment({ assignmentType: "NEW" }).validate(),
+    error => error.name === "ValidationError"
+  );
+
+  await assert.rejects(
+    validAssignment({ sourceType: "UNKNOWN" }).validate(),
+    error => error.name === "ValidationError"
+  );
+});
+
+test("EmployeeReportingAssignment declares required history indexes", () => {
+  const indexes = EmployeeReportingAssignment.schema.indexes();
+
+  assert.ok(getUniqueIndex(
+    EmployeeReportingAssignment.schema,
+    ["employeeId", "effectiveStartDate"]
+  ));
+
+  assert.ok(indexes.some(([keys]) =>
+    keys.teamLeadId === 1 &&
+    keys.teamId === 1 &&
+    keys.effectiveStartDate === -1
+  ));
+});
+
+test("EmployeeReportingAssignment rejects unexpected fields", () => {
+  assert.throws(
+    () =>
+      validAssignment({
+        unexpectedField: "not-allowed"
+      }),
+    /Field `unexpectedField` is not in schema/
+  );
+});
+
+test("User assignmentRevision defaults to zero", () => {
+  const user = new User({
+    name: "Test User",
+    email: "default@test.invalid",
+    password: "test-password",
+    role: "team_member"
+  });
+
+  assert.equal(user.assignmentRevision, 0);
+});
+
+test("User accepts assignmentRevision zero", () => {
+  const user = new User({
+    name: "Test User",
+    email: "zero@test.invalid",
+    password: "test-password",
+    role: "team_member",
+    assignmentRevision: 0
+  });
+
+  assert.equal(user.validateSync(), undefined);
+});
+
+test("User rejects negative assignmentRevision", () => {
+  const user = new User({
+    name: "Test User",
+    email: "negative@test.invalid",
+    password: "test-password",
+    role: "team_member",
+    assignmentRevision: -1
+  });
+
+  const error = user.validateSync();
+
+  assert.ok(error);
+  assert.ok(error.errors.assignmentRevision);
+});
+
+test("User rejects fractional assignmentRevision", () => {
+  const user = new User({
+    name: "Test User",
+    email: "fractional@test.invalid",
+    password: "test-password",
+    role: "team_member",
+    assignmentRevision: 1.5
+  });
+
+  const error = user.validateSync();
+
+  assert.ok(error);
+  assert.ok(error.errors.assignmentRevision);
 });
