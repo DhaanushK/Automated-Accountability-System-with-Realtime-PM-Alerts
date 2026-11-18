@@ -42,6 +42,29 @@ function assertGrantSource(grantSource) {
   }
 }
 
+function unavailable() {
+  return new SubmissionApiError(
+    503,
+    "DATABASE_UNAVAILABLE",
+    "Read authorization is temporarily unavailable."
+  );
+}
+
+function requireReadSession(session) {
+  if (
+    !session ||
+    typeof session !== "object" ||
+    Array.isArray(session) ||
+    session instanceof Date ||
+    session.id == null ||
+    session.hasEnded === true
+  ) {
+    throw unavailable();
+  }
+
+  return session;
+}
+
 /**
  * Verify persisted Project Manager organization authorization.
  * A caller-provided Boolean is never accepted as proof of access.
@@ -50,7 +73,7 @@ export async function assertProjectManagerOrganizationAccess(
   projectManager,
   {
     SubmissionAccessGrantModel = SubmissionAccessGrant,
-    session = null
+    session
   } = {}
 ) {
   // Verify actor and role.
@@ -79,21 +102,39 @@ export async function assertProjectManagerOrganizationAccess(
 
   assertValidObjectId(userId, "Project Manager identifier");
 
+  requireReadSession(session);
+
   const normalizedUserId = new mongoose.Types.ObjectId(userId);
 
-  // Verify persisted active organization authorization.
-  let grantQuery = SubmissionAccessGrantModel.findOne({
-    userId: normalizedUserId,
-    scope: "ORGANIZATION",
-    active: true
-  });
+  // Verify persisted active organization authorization in the caller's session.
+  let grant;
+  try {
+    const grantQuery = SubmissionAccessGrantModel.findOne({
+      userId: normalizedUserId,
+      scope: "ORGANIZATION",
+      active: true
+    });
 
-  // Reuse the caller's transaction session when supplied.
-  if (session) {
-    grantQuery = grantQuery.session(session);
+    if (
+      !grantQuery ||
+      typeof grantQuery.session !== "function"
+    ) {
+      throw unavailable();
+    }
+
+    const sessionQuery = grantQuery.session(session);
+    if (!sessionQuery || typeof sessionQuery.lean !== "function") {
+      throw unavailable();
+    }
+
+    grant = await sessionQuery.lean();
+  } catch (error) {
+    if (error instanceof SubmissionApiError) {
+      throw error;
+    }
+
+    throw unavailable();
   }
-
-  const grant = await grantQuery.lean();
 
   if (!grant) {
     throw new SubmissionApiError(

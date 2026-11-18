@@ -11,17 +11,34 @@ import {
   getAuthenticatedUserId,
   loadSubmissionActor
 } from "../services/submissionAccessService.js";
+import {
+  validateNoReadQueryParameters,
+  validateReadHistoryQuery,
+  validateReadReportingDate
+} from "../services/dailySubmissionReadRequestValidation.js";
 
 const SUPPORTED_ROLES = ["team_member", "team_lead", "project_manager"];
 
 function asyncRoute(handler) {
-  return (req, res, next) => Promise.resolve(handler(req, res, next)).catch(next);
+  return (req, res, next) => {
+    Promise.resolve()
+      .then(() => handler(req, res, next))
+      .catch(next);
+  };
+}
+
+function validateReadRequest(validator, handler) {
+  return asyncRoute((req, res, next) => {
+    validator(req);
+    return handler(req, res, next);
+  });
 }
 
 export function createDailySubmissionRouter({
   isStoreReady,
   clock = () => new Date(),
-  actorLoader = loadSubmissionActor
+  actorLoader = loadSubmissionActor,
+  controllers = dailySubmissionController
 } = {}) {
   const router = express.Router();
   const readinessGuard = createSubmissionStoreReadinessGuard(
@@ -44,32 +61,44 @@ export function createDailySubmissionRouter({
       const actor = assertActiveTeamMember(await actorLoader(userId));
       req.validatedSubmission = request;
       req.submissionActor = actor;
-      return dailySubmissionController.submit(req, res, next);
+      return controllers.submit(req, res, next);
     })
   );
 
   router.get(
     "/me/history",
     authorizeRoles("team_member"),
-    dailySubmissionController.getHistory
+    validateReadRequest(req => {
+      req.validatedReadQuery = validateReadHistoryQuery(req.query);
+    }, controllers.getHistory)
   );
+
   router.get(
     "/me/current",
     authorizeRoles("team_member"),
-    dailySubmissionController.getCurrent
+    validateReadRequest(req => {
+      req.validatedReadQuery = validateNoReadQueryParameters(req.query);
+    }, controllers.getCurrent)
   );
+
   router.get(
     "/me/:reportingDate",
     authorizeRoles("team_member"),
-    dailySubmissionController.getOwnDay
+    validateReadRequest(req => {
+      req.validatedReportingDate = validateReadReportingDate(
+        req.params.reportingDate
+      );
+      req.validatedReadQuery = validateNoReadQueryParameters(req.query);
+    }, controllers.getOwnDay)
   );
+
   router.get(
     "/:submissionId",
     authorizeRoles(...SUPPORTED_ROLES),
     (req, res, next) => {
       try {
         validateSubmissionId(req.params.submissionId);
-        return dailySubmissionController.getDetail(req, res, next);
+        return controllers.getDetail(req, res, next);
       } catch (error) {
         return next(error);
       }

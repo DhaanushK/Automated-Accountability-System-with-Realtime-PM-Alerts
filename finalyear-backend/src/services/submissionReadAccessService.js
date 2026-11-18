@@ -21,6 +21,21 @@ function forbidden() {
   );
 }
 
+function requireReadSession(session) {
+  if (
+    !session ||
+    typeof session !== "object" ||
+    Array.isArray(session) ||
+    session instanceof Date ||
+    session.id == null ||
+    session.hasEnded === true
+  ) {
+    throw unavailable();
+  }
+
+  return session;
+}
+
 function unavailable() {
   return new SubmissionApiError(
     503,
@@ -99,6 +114,7 @@ export async function assertTeamLeadHistoricalAccess(
       "A valid reporting date is required."
     );
   }
+  requireReadSession(session);
 
   let assignments;
 
@@ -211,6 +227,7 @@ export async function getTeamLeadAuthorizedDateRanges(
       "A valid reporting date range is required."
     );
   }
+  requireReadSession(session);
 
   let assignments;
 

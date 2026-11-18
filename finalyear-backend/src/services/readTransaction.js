@@ -14,38 +14,72 @@ import mongoose from "mongoose";
 export function createReadTransactionRunner(
   connection = mongoose.connection
 ) {
-  return async function runReadTransaction(operation) {
-    if (typeof operation !== "function") {
-      throw new TypeError("Read transaction operation must be a function");
-    }
+return async function runReadTransaction(operation) {
+  if (typeof operation !== "function") {
+    throw new TypeError("Read transaction operation must be a function");
+  }
 
-    // Fail closed if MongoDB is not connected.
-    if (connection.readyState !== 1) {
-      throw new Error("DATABASE_UNAVAILABLE");
-    }
+  if (connection.readyState !== 1) {
+    throw new Error("DATABASE_UNAVAILABLE");
+  }
 
-    const session = await connection.startSession();
+  const session = await connection.startSession();
 
+  let operationFailed = false;
+  let operationError;
+
+  try {
+    let result;
+
+    await session.withTransaction(
+      async () => {
+        result = await operation(session);
+      },
+      {
+        readPreference: "primary",
+        readConcern: { level: "snapshot" }
+      }
+    );
+
+    return result;
+  } catch (error) {
+    operationFailed = true;
+    operationError = error;
+    throw error;
+  } finally {
     try {
-      let result;
-
-      await session.withTransaction(
-        async () => {
-          result = await operation(session);
-        },
-        {
-          readPreference: "primary",
-          readConcern: {
-            level: "snapshot"
-          }
-        }
-      );
-
-      return result;
-    } finally {
       await session.endSession();
+    } catch (cleanupError) {
+      if (!operationFailed) {
+        throw cleanupError;
+      }
+
+      if (operationError instanceof Error) {
+        try {
+          Object.defineProperty(operationError, "cleanupError", {
+            value: cleanupError,
+            configurable: true,
+            enumerable: false,
+            writable: true
+          });
+        } catch {
+          throw new AggregateError(
+            [operationError, cleanupError],
+            "Read transaction and session cleanup both failed",
+            { cause: operationError }
+          );
+        }
+      } else {
+        throw new AggregateError(
+          [operationError, cleanupError],
+          "Read transaction and session cleanup both failed",
+          { cause: operationError }
+        );
+      }
     }
-  };
+  }
+};
+
 }
 
 // Production runner uses the application's default Mongoose connection.

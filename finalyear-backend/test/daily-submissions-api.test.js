@@ -8,19 +8,24 @@ import http from "node:http";
 import User from "../src/models/User.js";
 import { authMiddleware } from "../src/middleware/auth.js";
 import { createDailySubmissionRouter } from "../src/routes/dailySubmissionRoutes.js";
-import { dailySubmissionController } from "../src/controllers/dailySubmissionController.js";
 import {
-  formatSubmissionError,
-  getReportingDateAt,
-  validateReportingDateForSubmission,
-  validateSubmissionRequest
-} from "../src/services/dailySubmissionService.js";
+  createDailySubmissionController,
+  dailySubmissionController
+} from "../src/controllers/dailySubmissionController.js";
+
 import {
   assertActiveTeamMember,
   assertTeamLeadScope,
   getAuthenticatedUserId,
   loadSubmissionActor
 } from "../src/services/submissionAccessService.js";
+import {
+  SubmissionApiError,
+  formatSubmissionError,
+  getReportingDateAt,
+  validateReportingDateForSubmission,
+  validateSubmissionRequest
+} from "../src/services/dailySubmissionService.js";
 
 const tokenSecret = "offline-daily-submission-test-secret";
 const userId = "64b000000000000000000001";
@@ -44,20 +49,26 @@ async function withApi({
   active = true,
   actorLoader,
   userLookup,
-  setupFailure
+  setupFailure,
+  controllers = dailySubmissionController
 } = {}, callback) {
   // This helper temporarily patches process.env and singleton model/controller methods.
   // Concurrent tests using it are unsupported; keep them serial unless the harness
   // is redesigned around isolated dependency injection.
   const originalSecret = process.env.JWT_SECRET;
   const originalFindById = User.findById;
-  const controllerMethods = Object.keys(dailySubmissionController);
-  const originalControllers = Object.fromEntries(controllerMethods.map(key => [key, dailySubmissionController[key]]));
+  const controllerMethods = Object.keys(controllers);
+  const originalControllers = Object.fromEntries(
+    controllerMethods.map(key => [key, controllers[key]])
+);
   const calls = {
     userLookups: 0,
     actorLoads: 0,
     readiness: 0,
-    controllers: Object.fromEntries(controllerMethods.map(key => [key, 0]))
+    controllers: Object.fromEntries(controllerMethods.map(key => [key, 0])),
+    controllerRequests: Object.fromEntries(
+      controllerMethods.map(key => [key, []])
+    )
   };
 
   try {
@@ -77,8 +88,9 @@ async function withApi({
     };
 
     for (const key of controllerMethods) {
-      dailySubmissionController[key] = (...args) => {
+      controllers[key] = (...args) => {
         calls.controllers[key] += 1;
+        calls.controllerRequests[key].push(args[0]);
         return originalControllers[key](...args);
       };
     }
@@ -103,7 +115,8 @@ async function withApi({
           teamId: "team-1",
           managerId: null
         })))(...args);
-      }
+      },
+      controllers
     }));
     app.use((error, req, res, next) => {
       const result = formatSubmissionError(error);
@@ -116,7 +129,9 @@ async function withApi({
       User.findById = originalFindById;
     } finally {
       try {
-        for (const key of controllerMethods) dailySubmissionController[key] = originalControllers[key];
+        for (const key of controllerMethods) {
+          controllers[key] = originalControllers[key];
+      }
       } finally {
         if (originalSecret === undefined) delete process.env.JWT_SECRET;
         else process.env.JWT_SECRET = originalSecret;
@@ -537,7 +552,7 @@ test("POST rejects Team Leads and Project Managers before actor loading", async 
 
 test("database role controls each self-service route and rejected roles never reach controllers", async () => {
   const selfRoutes = [
-    ["/me/history", "getHistory"],
+    ["/me/history?fromDate=2026-11-01&toDate=2026-11-11", "getHistory"],
     ["/me/current", "getCurrent"],
     ["/me/" + reportingDate, "getOwnDay"]
   ];
@@ -773,3 +788,364 @@ test("Team Lead scope rejects inactive users and incomplete or mismatched roster
   );
 });
 
+// --------------------------------------------------
+// READ REQUEST HTTP VALIDATION
+// --------------------------------------------------
+
+test("self-service current endpoint rejects unsupported query parameters", async () => {
+  await withApi({ role: "team_member" }, async (send, calls) => {
+    const response = await send(
+      "/me/current?employeeId=64b000000000000000000002"
+    );
+
+    assert.equal(response.status, 400);
+    assert.equal(response.body.error.code, "VALIDATION_ERROR");
+    assert.equal(calls.controllers.getCurrent, 0);
+  });
+});
+
+test("self-service reporting date endpoint validates date and query parameters", async () => {
+  await withApi({ role: "team_member" }, async (send, calls) => {
+    const invalidDate = await send("/me/2026-02-30");
+
+    assert.equal(invalidDate.status, 400);
+    assert.equal(
+      invalidDate.body.error.code,
+      "INVALID_REPORTING_DATE"
+    );
+
+    const unsupportedQuery = await send(
+      "/me/2026-11-11?employeeId=64b000000000000000000002"
+    );
+
+    assert.equal(unsupportedQuery.status, 400);
+    assert.equal(
+      unsupportedQuery.body.error.code,
+      "VALIDATION_ERROR"
+    );
+
+    assert.equal(calls.controllers.getOwnDay, 0);
+  });
+});
+
+test("self-service history endpoint rejects invalid ranges and pagination", async () => {
+  await withApi({ role: "team_member" }, async (send, calls) => {
+    const requests = [
+      [
+        "/me/history",
+        "INVALID_REPORTING_DATE"
+      ],
+      [
+        "/me/history?fromDate=2026-11-12&toDate=2026-11-01",
+        "VALIDATION_ERROR"
+      ],
+      [
+        "/me/history?fromDate=2026-11-01&toDate=2026-11-11&limit=101",
+        "VALIDATION_ERROR"
+      ],
+      [
+        "/me/history?fromDate=2026-11-01&toDate=2026-11-11&page=1&page=2",
+        "VALIDATION_ERROR"
+      ],
+      [
+        "/me/history?fromDate=2026-11-01&toDate=2026-11-11&employeeId=64b000000000000000000002",
+        "VALIDATION_ERROR"
+      ]
+    ];
+
+    for (const [path, expectedCode] of requests) {
+      const response = await send(path);
+
+      assert.equal(response.status, 400, path);
+      assert.equal(response.body.error.code, expectedCode, path);
+    }
+
+    assert.equal(calls.controllers.getHistory, 0);
+  });
+});
+
+test("valid self-service read requests preserve validated values at the controller boundary", async () => {
+  await withApi({ role: "team_member" }, async (send, calls) => {
+    const requests = [
+      {
+        path: "/me/current",
+        controller: "getCurrent",
+        verify(req) {
+          assert.deepEqual(req.validatedReadQuery, {});
+        }
+      },
+      {
+        path: "/me/" + reportingDate,
+        controller: "getOwnDay",
+        verify(req) {
+          assert.equal(req.validatedReportingDate, reportingDate);
+          assert.deepEqual(req.validatedReadQuery, {});
+        }
+      },
+      {
+        path: "/me/history?fromDate=2026-11-01&toDate=2026-11-11&page=2&limit=50",
+        controller: "getHistory",
+        verify(req) {
+          assert.deepEqual(req.validatedReadQuery, {
+            fromDate: "2026-11-01",
+            toDate: "2026-11-11",
+            page: 2,
+            limit: 50
+          });
+        }
+      }
+    ];
+
+    for (const { path, controller, verify } of requests) {
+      const response = await send(path);
+
+      assert.equal(response.status, 501, path);
+      assert.equal(response.body.error.code, "NOT_IMPLEMENTED");
+      assert.equal(calls.controllers[controller], 1);
+      assert.equal(calls.controllerRequests[controller].length, 1);
+
+      const capturedRequest = calls.controllerRequests[controller][0];
+
+      assert.ok(capturedRequest);
+      verify(capturedRequest);
+    }
+  });
+});
+// --------------------------------------------------
+// INJECTED SELF-SERVICE READ CONTROLLER HTTP TESTS
+// --------------------------------------------------
+
+test("injected reporting-day controller forwards authenticated identity and validated date", async () => {
+  let serviceArguments;
+
+  const controllers = createDailySubmissionController({
+    readService: {
+      async getOwnDay(args) {
+        serviceArguments = args;
+        return {
+          reportingDate,
+          status: "Pending"
+        };
+      },
+      async getOwnCurrent() {},
+      async getOwnHistory() {}
+    },
+    clock: testClock,
+    enableSelfServiceReads: true
+  });
+
+  await withApi({ controllers }, async send => {
+    const response = await send("/me/" + reportingDate);
+
+    assert.equal(response.status, 200);
+    assert.deepEqual(response.body, {
+      success: true,
+      data: {
+        reportingDate,
+        status: "Pending"
+      }
+    });
+
+    assert.equal(serviceArguments.authenticatedUserId, userId);
+    assert.equal(serviceArguments.reportingDate, reportingDate);
+    assert.equal(serviceArguments.clock, testClock);
+  });
+});
+
+test("injected current-day controller returns the read-service result", async () => {
+  let serviceArguments;
+
+  const controllers = createDailySubmissionController({
+    readService: {
+      async getOwnDay() {},
+      async getOwnCurrent(args) {
+        serviceArguments = args;
+        return {
+          reportingDate,
+          status: "On-Time",
+          metrics: validMetrics
+        };
+      },
+      async getOwnHistory() {}
+    },
+    clock: testClock,
+    enableSelfServiceReads: true
+  });
+
+  await withApi({ controllers }, async send => {
+    const response = await send("/me/current");
+
+    assert.equal(response.status, 200);
+    assert.deepEqual(response.body, {
+      success: true,
+      data: {
+        reportingDate,
+        status: "On-Time",
+        metrics: validMetrics
+      }
+    });
+
+    assert.equal(serviceArguments.authenticatedUserId, userId);
+    assert.equal(serviceArguments.clock, testClock);
+  });
+});
+
+test("injected history controller forwards validated pagination and preserves empty results", async () => {
+  let serviceArguments;
+
+  const emptyHistory = {
+    items: [],
+    pagination: {
+      page: 2,
+      limit: 50,
+      totalRecords: 0,
+      totalPages: 0
+    }
+  };
+
+  const controllers = createDailySubmissionController({
+    readService: {
+      async getOwnDay() {},
+      async getOwnCurrent() {},
+      async getOwnHistory(args) {
+        serviceArguments = args;
+        return emptyHistory;
+      }
+    },
+    clock: testClock,
+    enableSelfServiceReads: true
+  });
+
+  await withApi({ controllers }, async send => {
+    const response = await send(
+      "/me/history?fromDate=2026-11-01&toDate=2026-11-11&page=2&limit=50"
+    );
+
+    assert.equal(response.status, 200);
+    assert.deepEqual(response.body, {
+      success: true,
+      data: emptyHistory
+    });
+
+    assert.equal(serviceArguments.authenticatedUserId, userId);
+    assert.equal(serviceArguments.fromDate, "2026-11-01");
+    assert.equal(serviceArguments.toDate, "2026-11-11");
+    assert.equal(serviceArguments.page, 2);
+    assert.equal(serviceArguments.limit, 50);
+    assert.equal(serviceArguments.clock, testClock);
+  });
+});
+
+test("injected read-service rejection reaches standard API error middleware", async () => {
+  const controllers = createDailySubmissionController({
+    readService: {
+      async getOwnDay() {},
+      async getOwnCurrent() {
+        throw new SubmissionApiError(
+          503,
+          "SUBMISSION_OUTCOME_UNCONFIRMED",
+          "Synthetic read failure"
+      );
+      },
+      async getOwnHistory() {}
+    },
+    clock: testClock,
+    enableSelfServiceReads: true
+  });
+
+  await withApi({ controllers }, async send => {
+    const response = await send("/me/current");
+
+    assert.equal(response.status, 503);
+    assert.equal(response.body.success, false);
+    assert.equal(
+      response.body.error.code,
+      "SUBMISSION_OUTCOME_UNCONFIRMED"
+    );
+    assert.equal(
+      JSON.stringify(response.body).includes("Synthetic read failure"),
+      false
+    );
+  });
+});
+
+test("self-service controller factory remains disabled unless explicitly enabled", () => {
+  const disabledController = createDailySubmissionController();
+
+  const response = {
+    statusCode: null,
+    body: null,
+    status(status) {
+      this.statusCode = status;
+      return this;
+    },
+    json(body) {
+      this.body = body;
+      return this;
+    }
+  };
+
+  disabledController.getCurrent({}, response);
+
+  assert.equal(response.statusCode, 501);
+  assert.equal(response.body.error.code, "NOT_IMPLEMENTED");
+});
+test("production-style injected composition keeps all five operations disabled", async () => {
+  const calls = {
+    getOwnDay: 0,
+    getOwnCurrent: 0,
+    getOwnHistory: 0
+  };
+  const readService = {
+    getOwnDay() {
+      calls.getOwnDay += 1;
+      throw new Error("Disabled read service must not execute");
+    },
+    getOwnCurrent() {
+      calls.getOwnCurrent += 1;
+      throw new Error("Disabled read service must not execute");
+    },
+    getOwnHistory() {
+      calls.getOwnHistory += 1;
+      throw new Error("Disabled read service must not execute");
+    }
+  };
+  const controllers = createDailySubmissionController({
+    readService,
+    enableSelfServiceReads: false
+  });
+
+  await withApi({ controllers }, async send => {
+    const requests = [
+      ["GET", "/me/current"],
+      ["GET", "/me/2026-11-11"],
+      ["GET", "/me/history?fromDate=2026-11-10&toDate=2026-11-11"],
+      ["POST", "/", { reportingDate, metrics: validMetrics }],
+      ["GET", "/64b000000000000000000001"]
+    ];
+
+    for (const [method, path, body] of requests) {
+      const response = await send(path, { method, body });
+      assert.equal(response.status, 501, method + " " + path);
+      assert.equal(response.body.success, false);
+      assert.equal(response.body.error.code, "NOT_IMPLEMENTED");
+    }
+  });
+
+  assert.deepEqual(calls, {
+    getOwnDay: 0,
+    getOwnCurrent: 0,
+    getOwnHistory: 0
+  });
+});
+test("ready daily-submission readiness allows request to reach disabled controller", async () => {
+  await withApi({ ready: true }, async (send, calls) => {
+    const response = await send("/me/current");
+
+    assert.equal(response.status, 501);
+    assert.equal(response.body.error.code, "NOT_IMPLEMENTED");
+    assert.equal(calls.readiness, 1);
+    assert.equal(calls.userLookups, 1);
+    assert.equal(calls.controllers.getCurrent, 1);
+  });
+});

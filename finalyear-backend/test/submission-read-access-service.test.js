@@ -1,4 +1,3 @@
-
 import test from "node:test";
 import assert from "node:assert/strict";
 import mongoose from "mongoose";
@@ -6,6 +5,7 @@ import mongoose from "mongoose";
 import {
   assertTeamMemberReadAccess,
   assertTeamLeadHistoricalAccess,
+  getTeamLeadAuthorizedDateRanges,
   assertProjectManagerReadAccess
 } from "../src/services/submissionReadAccessService.js";
 
@@ -13,6 +13,7 @@ const TEAM_LEAD_ID = "672000000000000000000001";
 const EMPLOYEE_ID = "672000000000000000000002";
 const OTHER_LEAD_ID = "672000000000000000000003";
 const PM_ID = "672000000000000000000004";
+
 
 function createAssignment(overrides = {}) {
   return {
@@ -213,7 +214,8 @@ test("Assignment start date is inclusive", async () => {
       employeeId: EMPLOYEE_ID,
       reportingDate: "2026-11-20",
       EmployeeReportingAssignmentModel:
-        createAssignmentModel([record])
+        createAssignmentModel([record]),
+      session: { id: "assignment-start-session" }
     }
   );
 
@@ -231,7 +233,8 @@ test("Assignment end date is inclusive", async () => {
       employeeId: EMPLOYEE_ID,
       reportingDate: "2026-11-20",
       EmployeeReportingAssignmentModel:
-        createAssignmentModel([record])
+        createAssignmentModel([record]),
+      session: { id: "assignment-end-session" }
     }
   );
 
@@ -246,7 +249,8 @@ test("No matching assignment denies access", async () => {
         employeeId: EMPLOYEE_ID,
         reportingDate: "2026-11-20",
         EmployeeReportingAssignmentModel:
-          createAssignmentModel([])
+          createAssignmentModel([]),
+        session: { id: "no-assignment-session" }
       }
     ),
     403,
@@ -267,7 +271,8 @@ test("Overlapping assignments across Team Leads fail closed", async () => {
             createAssignment({
               teamLeadId: new mongoose.Types.ObjectId(OTHER_LEAD_ID)
             })
-          ])
+          ]),
+        session: { id: "overlap-session" }
       }
     ),
     500,
@@ -287,7 +292,8 @@ test("Assignment belonging to another Team Lead denies access", async () => {
             createAssignment({
               teamLeadId: new mongoose.Types.ObjectId(OTHER_LEAD_ID)
             })
-          ])
+          ]),
+        session: { id: "other-lead-session" }
       }
     ),
     403,
@@ -335,7 +341,8 @@ test("Assignment database failure returns 503", async () => {
         employeeId: EMPLOYEE_ID,
         reportingDate: "2026-11-20",
         EmployeeReportingAssignmentModel:
-          createFailingAssignmentModel()
+          createFailingAssignmentModel(),
+        session: { id: "assignment-failure-session" }
       }
     ),
     503,
@@ -356,6 +363,9 @@ function createGrantModel(grant) {
       assert.equal(query.active, true);
 
       return {
+        session() {
+          return this;
+        },
         async lean() {
           return grant;
         }
@@ -373,7 +383,8 @@ test("Active Project Manager with active grant is authorized", async () => {
     },
     {
       SubmissionAccessGrantModel:
-        createGrantModel({ active: true, scope: "ORGANIZATION" })
+        createGrantModel({ active: true, scope: "ORGANIZATION" }),
+      session: { id: "project-manager-read-session" }
     }
   );
 
@@ -389,7 +400,8 @@ test("Project Manager without active grant is denied", async () => {
         active: true
       },
       {
-        SubmissionAccessGrantModel: createGrantModel(null)
+        SubmissionAccessGrantModel: createGrantModel(null),
+        session: { id: "no-grant-session" }
       }
     ),
     403,
@@ -427,12 +439,16 @@ test("Project Manager grant database failure returns 503", async () => {
         SubmissionAccessGrantModel: {
           findOne() {
             return {
+              session() {
+                return this;
+              },
               async lean() {
                 throw new Error("Simulated database failure");
               }
             };
-          }
-        }
+          },
+        },
+        session: { id: "grant-failure-session" }
       }
     ),
     503,

@@ -1,55 +1,143 @@
+
 import cron from 'node-cron';
 import { alertNotificationService } from '../services/alertNotificationService.js';
 
+const TIMEZONE = 'Asia/Kolkata';
+
+const ALERT_SCHEDULES = [
+  {
+    expression: '0 9 * * *',
+    label: 'morning alert analysis at 9:00 AM'
+  },
+  {
+    expression: '0 17 * * *',
+    label: 'evening alert analysis at 5:00 PM'
+  },
+  {
+    expression: '0 10 * * 1',
+    label: 'Monday morning alert analysis at 10:00 AM'
+  }
+];
+
+let scheduledTasks = [];
+let isInitialized = false;
+let isStopping = false;
+let stopPromise = null;
+
+const activeExecutions = new Set();
+
+function runAlertAnalysis(label) {
+  if (isStopping || !isInitialized) {
+    return Promise.resolve();
+  }
+
+  const execution = (async () => {
+    console.log(`[SCHEDULED] Running ${label}`);
+
+    try {
+      const result = await alertNotificationService.analyzeAndSendAlerts();
+      console.log(`[SUCCESS] ${label} completed:`, result);
+    } catch (error) {
+      console.error(`[ERROR] ${label} failed:`, error);
+    }
+  })();
+
+  activeExecutions.add(execution);
+
+  execution.then(
+    () => activeExecutions.delete(execution),
+    () => activeExecutions.delete(execution)
+  );
+
+  return execution;
+}
+
 export function initializeAlertScheduler() {
+  if (isInitialized || isStopping) {
+    console.log('[INFO] Alert Notification Scheduler is already initialized or stopping.');
+    return;
+  }
+
   console.log('[INIT] Initializing Alert Notification Scheduler...');
 
-  cron.schedule('0 9 * * *', async () => {
-    console.log('[SCHEDULED] Running morning alert analysis at 9:00 AM');
-    try {
-      const result = await alertNotificationService.analyzeAndSendAlerts();
-      console.log('[SUCCESS] Morning alert analysis completed:', result);
-    } catch (error) {
-      console.error('[ERROR] Morning alert analysis failed:', error);
-    }
-  }, {
-    scheduled: true,
-    timezone: "Asia/Kolkata"
-  });
+  const createdTasks = [];
 
-  cron.schedule('0 17 * * *', async () => {
-    console.log('[SCHEDULED] Running evening alert analysis at 5:00 PM');
-    try {
-      const result = await alertNotificationService.analyzeAndSendAlerts();
-      console.log('[SUCCESS] Evening alert analysis completed:', result);
-    } catch (error) {
-      console.error('[ERROR] Evening alert analysis failed:', error);
-    }
-  }, {
-    scheduled: true,
-    timezone: "Asia/Kolkata"
-  });
+  try {
+    for (const schedule of ALERT_SCHEDULES) {
+      const task = cron.schedule(
+        schedule.expression,
+        () => runAlertAnalysis(schedule.label),
+        {
+          scheduled: true,
+          timezone: TIMEZONE
+        }
+      );
 
-  cron.schedule('0 10 * * 1', async () => {
-    console.log('[SCHEDULED] Running Monday morning alert analysis at 10:00 AM');
-    try {
-      const result = await alertNotificationService.analyzeAndSendAlerts();
-      console.log('[SUCCESS] Monday alert analysis completed:', result);
-    } catch (error) {
-      console.error('[ERROR] Monday alert analysis failed:', error);
+      createdTasks.push(task);
     }
-  }, {
-    scheduled: true,
-    timezone: "Asia/Kolkata"
-  });
+  } catch (error) {
+    // Roll back partially initialized schedules.
+    createdTasks.forEach(task => task.stop());
+    throw error;
+  }
+
+  scheduledTasks = createdTasks;
+  isInitialized = true;
 
   console.log('[SUCCESS] Alert Notification Scheduler initialized successfully');
   console.log('Daily alerts: 9:00 AM, 5:00 PM');
   console.log('Weekly alert: Monday 10:00 AM');
-  console.log('Timezone: Asia/Kolkata');
+  console.log(`Timezone: ${TIMEZONE}`);
 }
 
 export function stopAlertScheduler() {
-  cron.getTasks().forEach(task => task.stop());
-  console.log('[STOP] Alert Notification Scheduler stopped');
+  if (stopPromise) {
+    return stopPromise;
+  }
+
+  if (!isInitialized) {
+    console.log('[INFO] Alert Notification Scheduler is not initialized.');
+    return Promise.resolve();
+  }
+
+  isStopping = true;
+
+  console.log('[STOP] Stopping Alert Notification Scheduler...');
+
+  const stoppingErrors = [];
+
+  for (const task of scheduledTasks) {
+    try {
+      task.stop();
+    } catch (error) {
+      stoppingErrors.push(error);
+    }
+  }
+
+  const executionsToDrain = [...activeExecutions];
+
+  stopPromise = Promise.resolve().then(async () => {
+    try {
+      await Promise.allSettled(executionsToDrain);
+
+      if (stoppingErrors.length > 0) {
+        throw new AggregateError(
+          stoppingErrors,
+          'One or more alert scheduler tasks failed to stop.'
+        );
+      }
+
+      scheduledTasks = [];
+      activeExecutions.clear();
+
+      isInitialized = false;
+      isStopping = false;
+
+      console.log('[STOP] Alert Notification Scheduler stopped.');
+    } finally {
+      stopPromise = null;
+    }
+  });
+
+  return stopPromise;
 }

@@ -1,4 +1,3 @@
-
 import test from "node:test";
 import assert from "node:assert/strict";
 
@@ -170,5 +169,107 @@ test("Rejects a non-function transaction operation", async () => {
   await assert.rejects(
     runReadTransaction(null),
     /Read transaction operation must be a function/
+  );
+});
+
+// --------------------------------------------------
+// TEST 6: SESSION CREATION FAILURE
+// --------------------------------------------------
+
+test("Preserves session creation failure without executing operation", async () => {
+  const sessionError = new Error("SESSION_CREATION_FAILURE");
+  let operationExecuted = false;
+
+  const connection = {
+    readyState: 1,
+
+    async startSession() {
+      throw sessionError;
+    }
+  };
+
+  const runReadTransaction =
+    createReadTransactionRunner(connection);
+
+  await assert.rejects(
+    runReadTransaction(async () => {
+      operationExecuted = true;
+    }),
+    error => error === sessionError
+  );
+
+  assert.equal(operationExecuted, false);
+});
+
+
+// --------------------------------------------------
+// TEST 7: SESSION CLEANUP FAILURE
+// --------------------------------------------------
+
+test("Propagates session cleanup failure after successful operation", async () => {
+  const cleanupError = new Error("SESSION_CLEANUP_FAILURE");
+
+  const connection = {
+    readyState: 1,
+
+    async startSession() {
+      return {
+        async withTransaction(callback) {
+          await callback();
+        },
+
+        async endSession() {
+          throw cleanupError;
+        }
+      };
+    }
+  };
+
+  const runReadTransaction =
+    createReadTransactionRunner(connection);
+
+  await assert.rejects(
+    runReadTransaction(async () => "READ_SUCCESS"),
+    error => error === cleanupError
+  );
+});
+
+
+// --------------------------------------------------
+// TEST 8: OPERATION AND CLEANUP FAILURE
+// --------------------------------------------------
+
+test("Preserves operation failure and retains cleanup failure separately", async () => {
+  const operationError = new Error("SIMULATED_READ_FAILURE");
+  const cleanupError = new Error("SESSION_CLEANUP_FAILURE");
+
+  const connection = {
+    readyState: 1,
+
+    async startSession() {
+      return {
+        async withTransaction(callback) {
+          await callback();
+        },
+
+        async endSession() {
+          throw cleanupError;
+        }
+      };
+    }
+  };
+
+  const runReadTransaction =
+    createReadTransactionRunner(connection);
+
+  await assert.rejects(
+    runReadTransaction(async () => {
+      throw operationError;
+    }),
+    error => {
+      assert.equal(error, operationError);
+      assert.equal(error.cleanupError, cleanupError);
+      return true;
+    }
   );
 });

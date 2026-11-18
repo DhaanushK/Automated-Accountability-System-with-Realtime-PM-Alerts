@@ -8,6 +8,7 @@ import {
   createOrganizationAccessGrant,
   revokeOrganizationAccessGrant
 } from "../src/services/submissionAccessGrantService.js";
+import { SubmissionApiError } from "../src/services/dailySubmissionService.js";
 
 const PM_ID = new mongoose.Types.ObjectId().toString();
 const TL_ID = new mongoose.Types.ObjectId().toString();
@@ -53,7 +54,9 @@ function createGrantModel({
   existingGrant = null,
   createResult = null,
   updateResult = { acknowledged: true, matchedCount: 1, modifiedCount: 1 },
-  createError = null
+  createError = null,
+  findOneError = null,
+  leanError = null
 } = {}) {
   const calls = {
     findOne: [],
@@ -68,12 +71,21 @@ function createGrantModel({
     findOne(query) {
       calls.findOne.push(query);
 
+      if (findOneError) {
+        throw findOneError;
+      }
+
       return {
         session(session){
           calls.sessions.push(session);
           return this;
         },
-        lean: async () => existingGrant
+        lean: async () => {
+          if (leanError) {
+            throw leanError;
+          }
+          return existingGrant;
+        }
       };
     },
 
@@ -112,7 +124,7 @@ async function expectApiError(promise, status, code) {
 test("Project Manager grant lookup uses the supplied session", async () => {
   const actor = createActor();
 
-  const session = { transactionId: "test-read-session" };
+  const session = { id: "test-read-session" };
 
   const grantModel = createGrantModel({
     existingGrant: createGrant()
@@ -135,7 +147,8 @@ test("Active Project Manager with persisted grant is authorized", async () => {
   });
 
   const result = await assertProjectManagerOrganizationAccess(actor, {
-    SubmissionAccessGrantModel: grantModel
+    SubmissionAccessGrantModel: grantModel,
+    session: { id: "active-pm-session" }
   });
 
   assert.equal(result, true);
@@ -155,10 +168,84 @@ test("Active Project Manager without persisted grant is forbidden", async () => 
 
   await expectApiError(
     assertProjectManagerOrganizationAccess(createActor(), {
-      SubmissionAccessGrantModel: grantModel
+      SubmissionAccessGrantModel: grantModel,
+      session: { id: "missing-grant-session" }
     }),
     403,
     "FORBIDDEN"
+  );
+});
+
+test("Direct grant lookup database failure maps to safe 503", async () => {
+  const grantModel = createGrantModel({
+    findOneError: new Error("sensitive server hostname and query details")
+  });
+
+  await expectApiError(
+    assertProjectManagerOrganizationAccess(createActor(), {
+      SubmissionAccessGrantModel: grantModel,
+      session: { id: "find-one-failure-session" }
+    }),
+    503,
+    "DATABASE_UNAVAILABLE"
+  );
+});
+
+test("Direct grant query execution failure maps to safe 503", async () => {
+  const grantModel = createGrantModel({
+    leanError: new Error("sensitive server hostname and query details")
+  });
+
+  await expectApiError(
+    assertProjectManagerOrganizationAccess(createActor(), {
+      SubmissionAccessGrantModel: grantModel,
+      session: { id: "lean-failure-session" }
+    }),
+    503,
+    "DATABASE_UNAVAILABLE"
+  );
+});
+
+test("Direct grant lookup preserves an existing SubmissionApiError", async () => {
+  const expectedError = new SubmissionApiError(
+    409,
+    "GRANT_LOOKUP_CONFLICT",
+    "The grant lookup was safely rejected."
+  );
+  const grantModel = createGrantModel({ findOneError: expectedError });
+
+  await assert.rejects(
+    assertProjectManagerOrganizationAccess(createActor(), {
+      SubmissionAccessGrantModel: grantModel,
+      session: { id: "api-error-session" }
+    }),
+    error => {
+      assert.equal(error.status, 409);
+      assert.equal(error.code, "GRANT_LOOKUP_CONFLICT");
+      assert.equal(error.message, "The grant lookup was safely rejected.");
+      return true;
+    }
+  );
+});
+
+test("Direct grant lookup does not expose sensitive database error details", async () => {
+  const grantModel = createGrantModel({
+    findOneError: new Error("mongodb://internal-host:27017/secret?password=hidden")
+  });
+
+  await assert.rejects(
+    assertProjectManagerOrganizationAccess(createActor(), {
+      SubmissionAccessGrantModel: grantModel,
+      session: { id: "redaction-session" }
+    }),
+    error => {
+      assert.equal(error.status, 503);
+      assert.equal(error.code, "DATABASE_UNAVAILABLE");
+      assert.equal(error.message, "Read authorization is temporarily unavailable.");
+      assert.equal(error.message.includes("internal-host"), false);
+      assert.equal(error.message.includes("password"), false);
+      return true;
+    }
   );
 });
 
