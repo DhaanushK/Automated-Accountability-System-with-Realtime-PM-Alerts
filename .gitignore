@@ -47,3 +47,5 @@ finalyear-frontend/public/terms-of-service.html
 finalyear-frontend/.env.production
 
 mongodb atlas credentials.png
+# Employee JWT tokens
+JWT Tokens of Employees.txt

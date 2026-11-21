@@ -79,7 +79,8 @@ async function withApi({
         _id: userId,
         email: "test@example.invalid",
         role,
-        name: "Offline Test"
+        name: "Offline Test",
+        active: true
       })
     }));
     User.findById = (...args) => {
@@ -472,7 +473,8 @@ test("authenticated JWT identity is used for database lookup", async () => {
           _id: alternateUserId,
           email: "alternate@example.invalid",
           role: "team_member",
-          name: "Alternate Test"
+          name: "Alternate Test",
+          active: true
         })
       };
     }
@@ -489,7 +491,7 @@ test("authenticated JWT identity is used for database lookup", async () => {
 });
 
 
-test("legacy authentication preserves the existing missing-user response", async () => {
+test("legacy authentication returns the current safe missing-user response", async () => {
   const originalSecret = process.env.JWT_SECRET;
   const originalFindById = User.findById;
 
@@ -510,8 +512,8 @@ test("legacy authentication preserves the existing missing-user response", async
       url: "/legacy",
       headers: { authorization: "Bearer " + signedToken() }
     });
-    assert.equal(response.status, 404);
-    assert.deepEqual(response.body, { message: "User not found" });
+    assert.equal(response.status, 401);
+    assert.deepEqual(response.body, { message: "Authenticated user is unavailable." });
   } finally {
     try {
       User.findById = originalFindById;
@@ -666,7 +668,8 @@ test("valid POST forwards the authenticated identity, never a client query ident
           _id: authenticatedId,
           email: "synthetic@example.invalid",
           role: "team_member",
-          name: "Synthetic Member"
+          name: "Synthetic Member",
+          active: true
         })
       };
     },

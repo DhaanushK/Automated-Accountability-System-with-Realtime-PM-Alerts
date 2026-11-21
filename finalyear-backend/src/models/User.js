@@ -49,7 +49,16 @@ const userSchema = new mongoose.Schema({
     message: "assignmentRevision must be a safe integer"
   }
   },
-  employmentEndDate: {
+  assignmentCoordinationVersion: {
+  type: Number,
+  default: 0,
+  min: 0,
+  validate: {
+    validator: Number.isSafeInteger,
+    message: "assignmentCoordinationVersion must be a safe integer"
+  }
+},
+employmentEndDate: {
     type: String,
     default: null,
     validate: {

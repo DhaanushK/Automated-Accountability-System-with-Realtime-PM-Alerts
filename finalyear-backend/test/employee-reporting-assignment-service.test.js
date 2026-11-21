@@ -156,17 +156,16 @@ function createMockAssignmentEnvironment({
   failSessionStart = false
 } = {}) {
   const state = {
-    employee: {
-      _id: new mongoose.Types.ObjectId(),
-      ...employee,
-      assignmentRevision: 0
-    },
+  employee: {
+    _id: new mongoose.Types.ObjectId(),
+    ...employee,
+    assignmentRevision: 0
+  },
 
-    teamLead: {
-      _id: new mongoose.Types.ObjectId(),
-      ...teamLead
-    },
-
+  teamLead: {
+    _id: new mongoose.Types.ObjectId(),
+    ...teamLead
+  },
     assignments: [...existingAssignments],
     concurrentCommittedAssignments: [],
     revisionUpdates: 0,

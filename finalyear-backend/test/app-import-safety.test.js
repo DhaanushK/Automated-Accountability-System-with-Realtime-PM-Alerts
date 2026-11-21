@@ -196,6 +196,7 @@ test("Express app import is side-effect-free and all daily operations stay disab
         "/api/emails",
         "/api/users",
         "/api/mailbox",
+        "/api/internal-mailbox",
         "/api/calendar",
         "/api/tickets",
         "/api/alerts"
@@ -226,8 +227,8 @@ test("Express app import is side-effect-free and all daily operations stay disab
       });
       User.findById = id => ({
         select(fields) {
-          if (fields === "email role name") {
-            return Promise.resolve({ email: "offline@example.invalid", role: "team_member", name: "Offline" });
+          if (fields === "email role name active") {
+            return Promise.resolve({ _id: id, email: "offline@example.invalid", role: "team_member", name: "Offline", active: true });
           }
           return {
             lean: async () => ({

@@ -1,3 +1,4 @@
+
 import jwt from "jsonwebtoken";
 import User from "../models/User.js";
 
@@ -31,53 +32,76 @@ export const authMiddleware = async (req, res, next) => {
 
   let decoded;
 
-  // Step 1: Verify the JWT.
+  // Step 1: Verify JWT
   try {
-    decoded = jwt.verify(token, process.env.JWT_SECRET);
-  } catch {
-    console.warn("[auth] Token verification failed.");
+    if (!process.env.JWT_SECRET) {
+      console.error("[auth] JWT_SECRET is not configured.");
 
+      return sendAuthError(
+        req,
+        res,
+        500,
+        "AUTHENTICATION_UNAVAILABLE",
+        "Authentication service is unavailable."
+      );
+    }
+
+    decoded = jwt.verify(token, process.env.JWT_SECRET);
+
+    if (!decoded.id) {
+      return sendAuthError(
+        req,
+        res,
+        401,
+        "UNAUTHENTICATED",
+        "Invalid token payload."
+      );
+    }
+
+  } catch {
     return sendAuthError(
       req,
       res,
       401,
       "UNAUTHENTICATED",
-      "Invalid token"
+      "Invalid or expired token"
     );
   }
 
-  // Step 2: Retrieve fresh user data from MongoDB.
+  // Step 2: Retrieve fresh user information
   try {
     const user = await User.findById(decoded.id)
-      .select("email role name");
+      .select("email role name active");
 
     if (!user) {
-      if (req.standardApiErrors) {
-        return sendAuthError(
-          req,
-          res,
-          401,
-          "UNAUTHENTICATED",
-          "The authenticated user is unavailable."
-        );
-      }
-
-      // Preserve the existing legacy API response.
       return sendAuthError(
         req,
         res,
-        404,
-        "USER_NOT_FOUND",
-        "User not found"
+        401,
+        "UNAUTHENTICATED",
+        "Authenticated user is unavailable."
       );
     }
 
-    // Database values remain authoritative for user information.
+    // Step 3: Enforce account activation
+    if (user.active !== true) {
+      return sendAuthError(
+        req,
+        res,
+        403,
+        "ACCOUNT_INACTIVE",
+        "Your account is inactive. Contact your Project Manager."
+      );
+    }
+
+    // Step 4: Use fresh database values
     req.user = {
       ...decoded,
+      id: user._id.toString(),
       email: user.email,
       role: user.role,
-      name: user.name
+      name: user.name,
+      active: user.active
     };
 
     return next();
@@ -98,7 +122,7 @@ export const authMiddleware = async (req, res, next) => {
 // Role-based access check
 export const authorizeRoles = (...allowedRoles) => {
   return (req, res, next) => {
-    if (!allowedRoles.includes(req.user.role)) {
+    if (!req.user || !allowedRoles.includes(req.user.role)) {
       return sendAuthError(
         req,
         res,
@@ -108,6 +132,6 @@ export const authorizeRoles = (...allowedRoles) => {
       );
     }
 
-    next();
+    return next();
   };
 };

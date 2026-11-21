@@ -43,9 +43,8 @@ function securityHeaders(req, res, next) {
 
 function requestLogger(req, res, next) {
   console.log(`${req.method} ${req.url}`, {
-    body: req.body,
-    query: req.query,
-    params: req.params
+    method: req.method,
+    path: req.path
   });
   next();
 }
@@ -106,6 +105,7 @@ const localRouterMounts = [
   ["/api/emails", () => import("./routes/emailRoutes.js")],
   ["/api/users", () => import("./routes/userRoutes.js")],
   ["/api/mailbox", () => import("./routes/mailboxRoutes.js")],
+  ["/api/internal-mailbox", () => import("./routes/internalMailRoutes.js")],
   ["/api/calendar", () => import("./routes/calendarRoutes.js")],
   ["/api/tickets", () => import("./routes/ticketRoutes.js")],
   ["/api/alerts", () => import("./routes/alertRoutes.js")]
@@ -131,7 +131,12 @@ app.use((err, req, res, next) => {
     if (formatted.status >= 500) console.error("[daily-submissions] Request failed:", err?.name || "Error");
     return res.status(formatted.status).json(formatted.body);
   }
-  console.error("Error:", err);
+  console.error("[API] Request failed:", {
+  method: req.method,
+  path: req.path,
+  errorName: err?.name || "Error",
+  statusCode: err?.status || 500
+  });
 
   // Set CORS headers
   res.header("Access-Control-Allow-Origin", "*");

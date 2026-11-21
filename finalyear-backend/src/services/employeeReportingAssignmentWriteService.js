@@ -246,7 +246,6 @@ const teamLead = await loadUser(
           "The employee or Team Lead account does not exist."
         );
       }
-
       if (employee.role !== "team_member") {
         throw assignmentError(
           409,
@@ -284,7 +283,7 @@ const teamLead = await loadUser(
           role: "team_member"
         },
         {
-          $inc: { assignmentRevision: 1 }
+          $inc: { assignmentRevision: 1, assignmentCoordinationVersion: 1 }
         },
         { session }
       );

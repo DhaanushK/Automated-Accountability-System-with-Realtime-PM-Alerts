@@ -1,87 +1,151 @@
+
 import express from "express";
 import User from "../models/User.js";
 import bcrypt from "bcryptjs";
 import jwt from "jsonwebtoken";
-import { authMiddleware } from "../middleware/auth.js";
+import {
+  authMiddleware,
+  authorizeRoles
+} from "../middleware/auth.js";
 
 const router = express.Router();
 
-// Register
-router.post("/register", async (req, res) => {
-  const { name, email, password, role } = req.body;
-  try {
-    const hashedPassword = await bcrypt.hash(password, 10);
-    const user = await User.create({ name, email, password: hashedPassword, role });
-    res.status(201).json({ message: "User registered", user });
-  } catch (err) {
-    res.status(500).json({ message: err.message });
+const ALLOWED_ROLES = [
+  "team_member",
+  "team_lead",
+  "project_manager"
+];
+
+// Register — Project Manager only
+router.post(
+  "/register",
+  authMiddleware,
+  authorizeRoles("project_manager"),
+  async (req, res) => {
+    try {
+      const { name, email, password, role } = req.body;
+
+      if (
+        typeof name !== "string" ||
+        !name.trim() ||
+        typeof email !== "string" ||
+        !email.trim() ||
+        typeof password !== "string" ||
+        !password ||
+        !ALLOWED_ROLES.includes(role)
+      ) {
+        return res.status(400).json({
+          success: false,
+          message: "Valid name, email, password and role are required."
+        });
+      }
+
+      const normalizedEmail = email.trim().toLowerCase();
+
+      const existingUser = await User.findOne({
+        email: normalizedEmail
+      });
+
+      if (existingUser) {
+        return res.status(409).json({
+          success: false,
+          message: "An account with this email already exists."
+        });
+      }
+
+      const hashedPassword = await bcrypt.hash(password, 10);
+
+      const user = await User.create({
+        name: name.trim(),
+        email: normalizedEmail,
+        password: hashedPassword,
+        role,
+        active: true
+      });
+
+      return res.status(201).json({
+        success: true,
+        message: "User registered successfully.",
+        user: {
+          id: user._id,
+          name: user.name,
+          email: user.email,
+          role: user.role,
+          active: user.active
+        }
+      });
+
+    } catch (error) {
+      if (error.code === 11000) {
+        return res.status(409).json({
+          success: false,
+          message: "An account with this email already exists."
+        });
+      }
+
+      console.error("[auth] Registration failed.");
+
+      return res.status(500).json({
+        success: false,
+        message: "Unable to register user."
+      });
+    }
   }
-});
+);
 
 // Login
 router.post("/login", async (req, res) => {
-  console.log('Login attempt:', { email: req.body.email });
-  
   try {
     const { email, password } = req.body;
-    
-    if (!email || !password) {
-      console.log('Missing credentials');
-      return res.status(400).json({ message: "Email and password are required" });
+
+    if (
+      typeof email !== "string" ||
+      !email.trim() ||
+      typeof password !== "string" ||
+      !password
+    ) {
+      return res.status(400).json({
+        message: "Email and password are required"
+      });
     }
 
-    console.log('Finding user in database...');
-    const user = await User.findOne({ email });
-    
-    if (!user) {
-      console.log('User not found:', email);
-      return res.status(400).json({ message: "Invalid credentials" });
+    const normalizedEmail = email.trim().toLowerCase();
+
+    const user = await User.findOne({
+      email: normalizedEmail
+    });
+
+    if (!user || !user.active) {
+      return res.status(401).json({
+        message: "Invalid credentials or inactive account."
+      });
     }
 
-    console.log('User found, verifying password...');
-    const isMatch = await bcrypt.compare(password, user.password);
-    
+    const isMatch = await bcrypt.compare(
+      password,
+      user.password
+    );
+
     if (!isMatch) {
-      console.log('Invalid password for user:', email);
-      return res.status(400).json({ message: "Invalid credentials" });
+      return res.status(400).json({
+        message: "Invalid credentials"
+      });
     }
 
-    console.log('Password verified, generating token...');
     if (!process.env.JWT_SECRET) {
-      console.error('JWT_SECRET is not set!');
-      return res.status(500).json({ message: "Server configuration error" });
-    }
+      console.error("[auth] JWT_SECRET is not configured.");
 
-    // Validate user object
-    if (!user || !user._id) {
-      console.error('Invalid user object:', user);
-      return res.status(500).json({ message: "User data corrupted" });
-    }
-
-    // Convert user document to plain object and validate required fields
-    const userObj = user.toObject();
-    const requiredFields = ['email', 'role', 'name'];
-    const missingFields = requiredFields.filter(field => !userObj[field]);
-    
-    if (missingFields.length > 0) {
-      console.error('Missing required user fields:', {
-        missing: missingFields,
-        user: userObj
-      });
-      return res.status(500).json({ 
-        message: `Incomplete user data: missing ${missingFields.join(', ')}` 
+      return res.status(500).json({
+        message: "Server configuration error"
       });
     }
 
-    // Create token payload with all necessary user data
     const tokenPayload = {
       id: user._id.toString(),
-      email: userObj.email,    // Explicitly include email
-      role: userObj.role,      // Explicitly include role
-      name: userObj.name       // Explicitly include name
+      email: user.email,
+      role: user.role,
+      name: user.name
     };
-
-    console.log('Creating token with payload:', tokenPayload);
 
     const token = jwt.sign(
       tokenPayload,
@@ -89,21 +153,19 @@ router.post("/login", async (req, res) => {
       { expiresIn: "1d" }
     );
 
-    console.log('Login successful for user:', email);
-    console.log('Token created with payload:', tokenPayload);
-    
-    res.json({ 
-      token, 
-      role: user.role, 
-      email: user.email, 
+    return res.json({
+      token,
+      role: user.role,
+      email: user.email,
       username: user.name,
       id: user._id.toString()
     });
-  } catch (err) {
-    console.error('Login error:', err);
-    res.status(500).json({ 
-      message: "An error occurred during login",
-      error: process.env.NODE_ENV === 'development' ? err.message : undefined
+
+  } catch (error) {
+    console.error("[auth] Login failed.");
+
+    return res.status(500).json({
+      message: "An error occurred during login"
     });
   }
 });
@@ -111,42 +173,28 @@ router.post("/login", async (req, res) => {
 // Get current user details
 router.get("/me", authMiddleware, async (req, res) => {
   try {
-    // Log the decoded token data
-    console.log('Decoded token data:', req.user);
+    const user = await User.findById(req.user.id)
+      .select("-password");
 
-    // Fetch fresh user data from database
-    const user = await User.findById(req.user.id).select('-password');
     if (!user) {
-      console.log('User not found in database');
-      return res.status(404).json({ message: "User not found" });
+      return res.status(404).json({
+        message: "User not found"
+      });
     }
 
-    // Get user data from the token if database fetch fails
-    const fallbackEmail = req.user.email;
-
-    const userData = {
+    return res.json({
       id: user._id,
       role: user.role,
-      email: user.email || fallbackEmail, // Use email from token if not in DB
+      email: user.email,
       name: user.name
-    };
+    });
 
-    console.log('User data to send:', userData);
-
-    // Validate email presence
-    if (!userData.email) {
-      console.error('No email found in user data or token:', {
-        userDoc: user.toObject(),
-        tokenData: req.user
-      });
-      return res.status(500).json({ message: "User email not found" });
-    }
-
-    console.log('Sending complete user data:', userData);
-    res.json(userData);
   } catch (error) {
-    console.error('Error fetching user details:', error);
-    res.status(500).json({ message: error.message });
+    console.error("[auth] Current-user lookup failed.");
+
+    return res.status(500).json({
+      message: "Unable to fetch user details."
+    });
   }
 });
 
