@@ -268,6 +268,14 @@ export async function sendConversationReply({
           "RECIPIENT_INACTIVE"
         );
       }
+      // Revalidate current mailbox permissions before allowing a reply.
+      // Original conversation membership alone does not authorize a reply
+      // after the reporting assignment changes.
+      await assertCanStartConversation(
+        sender._id,
+        recipient._id,
+        session
+      );
 
       // Store the reply.
       const [message] = await InternalMessage.create(
